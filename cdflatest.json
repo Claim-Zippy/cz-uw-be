@@ -1,0 +1,53 @@
+{
+    "assessmentType": "diabetes",
+    "assessmentId": "diabetes_assessment_001",
+    "questions": [
+        {
+            "questionId": "q1",
+            "questionText": "Do you have diabetes, or have you been told you have high blood sugar by a doctor?",
+            "answerType": "multiple-choice",
+            "choices": [
+                {
+                    "choiceText": "Yes",
+                    "nextQuestionId": "q2"
+                },
+                {
+                    "choiceText": "No",
+                    "nextQuestionId": null
+                }
+            ]
+        },
+        {
+            "questionId": "q2",
+            "questionText": "How long ago were you diagnosed with diabetes?",
+            "answerType": "multiple-choice",
+            "choices": [
+                {
+                    "choiceText": "Less than 1 year",
+                    "nextQuestionId": "q3"
+                },
+                {
+                    "choiceText": "1–5 years",
+                    "nextQuestionId": "q3"
+                },
+                {
+                    "choiceText": "More than 5 years",
+                    "nextQuestionId": "q3"
+                }
+            ]
+        }
+    ],
+    "outcomes": [
+        {
+            "outcomeId": "outcome_no_diabetes",
+            "description": "The proposer does not have diabetes or concerning symptoms.",
+            "criteria": [
+                {
+                    "questionId": "q1",
+                    "expectedAnswer": "No"
+                }
+            ],
+            "icd10_code": "No Condition"
+        }
+    ]
+}
