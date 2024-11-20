@@ -24,6 +24,7 @@ Todo list:
 
 
 const express = require('express');
+const session = require('express-session');
 const bodyParser = require('body-parser');
 const mongoose = require('mongoose');
 const app = express();
@@ -39,6 +40,17 @@ mongoose.connect(mongoURI, { useNewUrlParser: true, useUnifiedTopology: true })
 
 // Use JSON parser middleware
 app.use(bodyParser.json());
+app.use(express.urlencoded({ extended: true }));
+
+app.use(session({
+    secret: 'your-secret-key',  // Change this to a secure secret key
+    resave: false,
+    saveUninitialized: true,
+    cookie: { 
+        secure: process.env.NODE_ENV === 'production', // Use secure cookies in production
+        maxAge: 24 * 60 * 60 * 1000 // 24 hours
+    }
+}));
 
 // Mongoose Schema for the cdf_master collection (Question bank)
 const cdfMasterSchema = new mongoose.Schema({
@@ -79,6 +91,7 @@ const cdfRespondentsSchema = new mongoose.Schema({
     proposerId: String,
     assessmentType: String,
     assessmentId: String,
+    selectedDisease: [String],
     responses: [
         {
             questionId: String,
@@ -110,39 +123,135 @@ app.get('/api/cdfmasters', async (req, res) => {
 
 
 // API to fetch a question from the cdf_master collection (read-only)
-app.get('/api/0.0/assessments/:assessmentType/questions/:questionId', async (req, res) => {
-    const { assessmentType, questionId } = req.params;
+app.get('/api/0.0/assessments/:assessmentType/first-question', async (req, res) => {
+    const { assessmentType } = req.params;
 
     try {
-        // Fetch assessment from cdf_master collection, excluding nextQuestionId from choices using projections
         const assessment = await CdfMaster.findOne(
             { assessmentType },
             {
+                "questions.questionId": 1,
                 "questions.questionText": 1,
-                "questions.questionId": 1,               // Include only questionId
-                "questions.choices.choiceText": 1,        // Include choiceText
-                // Exclude nextQuestionId from choices in the projection
+                "questions.answerType": 1,
+                "questions.choices.choiceText": 1
             }
         );
-        console.log("assessment: ", assessment)
 
         if (!assessment) {
             return res.status(404).json({ error: "Assessment not found" });
         }
-        console.log("questionId: ", questionId)
-        // Find the specific question from the assessment
-        const question = assessment.questions.find(q => {
-            console.log(`Checking questionId: ${q.questionId}`);
-            return q.questionId === questionId;
-        });
 
+        const firstQuestion = assessment.questions[0];
 
-        if (!question) {
-            return res.status(404).json({ error: "Question not found" });
+        if (!firstQuestion) {
+            return res.status(404).json({ error: "No questions found in assessment" });
         }
 
-        // Send the question back to the front-end
-        res.json({ question });
+        // Initialize session data
+        req.session.assessmentData = {
+            currentQuestionId: firstQuestion.questionId,
+            assessmentType: assessmentType,
+            userResponses: []
+        };
+
+        // Send response
+        const formattedQuestion = {
+            questionText: firstQuestion.questionText,
+            answerType: firstQuestion.answerType,
+            choices: firstQuestion.choices.map(choice => ({
+                choiceText: choice.choiceText
+            }))
+        };
+
+        res.json({ question: formattedQuestion });
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ error: "Server error" });
+    }
+});
+
+// 2. API endpoint for getting next question
+app.post('/api/0.0/assessments/next-question', async (req, res) => {
+    const { selectedChoice } = req.body;
+    
+    try {
+        // Check if session exists
+        if (!req.session.assessmentData) {
+            return res.status(400).json({ 
+                error: "Assessment session not found. Please start a new assessment." 
+            });
+        }
+
+        const { currentQuestionId, assessmentType } = req.session.assessmentData;
+
+        const assessment = await CdfMaster.findOne({ assessmentType });
+
+        if (!assessment) {
+            return res.status(404).json({ error: "Assessment not found" });
+        }
+
+        const currentQuestion = assessment.questions.find(q => q.questionId === currentQuestionId);
+        
+        if (!currentQuestion) {
+            return res.status(404).json({ error: "Current question not found" });
+        }
+
+        const selectedChoiceObj = currentQuestion.choices.find(c => c.choiceText === selectedChoice);
+        
+        if (!selectedChoiceObj) {
+            return res.status(400).json({ error: "Invalid choice selected" });
+        }
+
+        // Store response
+        req.session.assessmentData.userResponses.push({
+            questionId: currentQuestionId,
+            response: selectedChoice
+        });
+
+        // Check if assessment is complete
+        if (!selectedChoiceObj.nextQuestionId) {
+            const outcome = assessment.outcomes.find(o => 
+                o.criteria.every(c => {
+                    const userResponse = req.session.assessmentData.userResponses
+                        .find(r => r.questionId === c.questionId);
+                    return userResponse && userResponse.response === c.expectedAnswer;
+                })
+            );
+
+            // Clear session
+            req.session.assessmentData = null;
+
+            return res.json({ 
+                completed: true,
+                outcome: outcome ? {
+                    description: outcome.description,
+                    icd10_code: outcome.icd10_code
+                } : null
+            });
+        }
+
+        // Find and prepare next question
+        const nextQuestion = assessment.questions.find(q => 
+            q.questionId === selectedChoiceObj.nextQuestionId
+        );
+
+        if (!nextQuestion) {
+            return res.status(404).json({ error: "Next question not found" });
+        }
+
+        // Update session with new question ID
+        req.session.assessmentData.currentQuestionId = nextQuestion.questionId;
+
+        // Format response
+        const formattedQuestion = {
+            questionText: nextQuestion.questionText,
+            answerType: nextQuestion.answerType,
+            choices: nextQuestion.choices.map(choice => ({
+                choiceText: choice.choiceText
+            }))
+        };
+
+        res.json({ question: formattedQuestion });
     } catch (error) {
         console.error(error);
         res.status(500).json({ error: "Server error" });
