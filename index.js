@@ -131,12 +131,13 @@ const CDFMasterSchema = new mongoose.Schema({
 
 const CDFMaster = mongoose.model('CDFMaster', CDFMasterSchema);
 
-app.get('/api/cdfmasters', async (req, res) => {
+app.get('/api/0.0/diseases', async (req, res) => {
     try {
-        const activeAssessments = await CDFMaster.find({ inactive: { $ne: true } });
-        res.json(activeAssessments);
-    } catch (err) {
-        res.status(500).json({ error: 'Error fetching assessments.' });
+        const diseases = await CdfMaster.distinct('assessmentType');
+        res.json({ diseases });
+    } catch (error) {
+        console.error('Error fetching diseases:', error);
+        res.status(500).json({ error: 'Server error' });
     }
 });
 
