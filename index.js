@@ -25,13 +25,10 @@ Todo list:
 
 const express = require('express');
 const session = require('express-session');
-// const morgan = require('morgan');
 const bodyParser = require('body-parser');
 const mongoose = require('mongoose');
 const app = express();
 const PORT = 5001;
-
-// app.use(morgan);
 
 // MongoDB connection string
 const mongoURI = 'mongodb://localhost:27017/underwriting';  // Change this to your actual connection string
@@ -46,12 +43,12 @@ app.use(bodyParser.json());
 app.use(express.urlencoded({ extended: true }));
 
 app.use(session({
-    secret: 'Tesla',  // Change this to a secure secret key
+    secret: 'your-secret-key',  // Change this to a secure secret key
     resave: false,
     saveUninitialized: true,
     cookie: { 
         secure: process.env.NODE_ENV === 'production', // Use secure cookies in production
-        maxAge: 1 * 60 * 60 * 1000 // 1 hour
+        maxAge: 24 * 60 * 60 * 1000 // 24 hours
     }
 }));
 
@@ -86,22 +83,6 @@ const cdfMasterSchema = new mongoose.Schema({
         }
     ]
 });
-
-const userSchema = new mongoose.Schema({
-    username: {
-      type: String,
-      required: true,
-      unique: true
-    },
-    email: {
-      type: String,
-      required: true,
-      unique: true
-    },
-    // Add other user fields as needed
-  }, { timestamps: true });
-  
-  const User = mongoose.model('User', userSchema);
 
 const CdfMaster = mongoose.model('CdfMaster', cdfMasterSchema);
 
@@ -195,13 +176,6 @@ app.post('/api/0.0/assessments/next-question', async (req, res) => {
     const { selectedChoice, proposerId } = req.body;
     
     try {
-        // Validate proposerId
-        if (!proposerId) {
-            return res.status(400).json({ 
-                error: "Proposer ID is required" 
-            });
-        }
-
         // Check if session exists
         if (!req.session.assessmentData) {
             return res.status(400).json({ 
@@ -209,85 +183,75 @@ app.post('/api/0.0/assessments/next-question', async (req, res) => {
             });
         }
 
-        const { 
-            currentQuestionId, 
-            assessmentType,
-            assessmentId
-        } = req.session.assessmentData;
+        const { currentQuestionId, assessmentType } = req.session.assessmentData;
 
-        // Find the assessment in CdfMaster
         const assessment = await CdfMaster.findOne({ assessmentType });
 
         if (!assessment) {
             return res.status(404).json({ error: "Assessment not found" });
         }
 
-        // Find current question
-        const currentQuestion = assessment.questions.find(
-            q => q.questionId === currentQuestionId
-        );
+        const currentQuestion = assessment.questions.find(q => q.questionId === currentQuestionId);
         
         if (!currentQuestion) {
             return res.status(404).json({ error: "Current question not found" });
         }
 
-        // Validate selected choice
-        const selectedChoiceObj = currentQuestion.choices.find(
-            c => c.choiceText === selectedChoice
-        );
+        const selectedChoiceObj = currentQuestion.choices.find(c => c.choiceText === selectedChoice);
         
         if (!selectedChoiceObj) {
             return res.status(400).json({ error: "Invalid choice selected" });
         }
 
-        // Prepare current response
-        const currentResponse = {
+        // Store response
+        const userResponse = {
             questionId: currentQuestionId,
             questionText: currentQuestion.questionText,
             answer: selectedChoice,
             timestamp: new Date()
         };
 
-        // Find or create CdfRespondents document
-        let respondentsDoc = await CdfRespondents.findOne({ 
-            proposerId: proposerId, 
-            assessmentType: assessmentType,
-            assessmentId: assessmentId
+        req.session.assessmentData.userResponses.push({
+            questionId: currentQuestionId,
+            response: selectedChoice
         });
 
-        // If no existing document, create a new one
-        if (!respondentsDoc) {
-            respondentsDoc = new CdfRespondents({
-                proposerId: proposerId,
-                assessmentType: assessmentType,
-                assessmentId: assessmentId,
-                selectedDisease: [],
+        // Save response to the database
+        let respondent = await CdfRespondents.findOne({
+            proposerId,
+            assessmentType
+        });
+
+        if (!respondent) {
+            respondent = new CdfRespondents({
+                proposerId,
+                assessmentType,
+                assessmentId: assessment._id,
+                selectedDisease: req.session.assessmentData.selectedDiseases || [],
                 responses: []
             });
         }
 
-        // Add current response to responses
-        respondentsDoc.responses.push(currentResponse);
+        respondent.responses.push(userResponse);
 
         // Check if assessment is complete
         if (!selectedChoiceObj.nextQuestionId) {
-            // Determine final outcome
             const outcome = assessment.outcomes.find(o => 
                 o.criteria.every(c => {
-                    const userResponse = respondentsDoc.responses
+                    const userResponse = req.session.assessmentData.userResponses
                         .find(r => r.questionId === c.questionId);
-                    return userResponse && 
-                           userResponse.answer === c.expectedAnswer;
+                    return userResponse && userResponse.response === c.expectedAnswer;
                 })
             );
 
-            // Add selected diseases if outcome exists
-            if (outcome && outcome.selectedDiseases) {
-                respondentsDoc.selectedDisease = outcome.selectedDiseases;
-            }
+            // Add outcome to respondent
+            respondent.outcome = outcome ? {
+                description: outcome.description,
+                icd10_code: outcome.icd10_code
+            } : null;
 
-            // Save the final document
-            await respondentsDoc.save();
+            // Save respondent to database
+            await respondent.save();
 
             // Clear session
             req.session.assessmentData = null;
@@ -296,14 +260,14 @@ app.post('/api/0.0/assessments/next-question', async (req, res) => {
                 completed: true,
                 outcome: outcome ? {
                     description: outcome.description,
-                    selectedDiseases: outcome.selectedDiseases
+                    icd10_code: outcome.icd10_code
                 } : null
             });
         }
 
-        // Find next question
-        const nextQuestion = assessment.questions.find(
-            q => q.questionId === selectedChoiceObj.nextQuestionId
+        // Find and prepare next question
+        const nextQuestion = assessment.questions.find(q => 
+            q.questionId === selectedChoiceObj.nextQuestionId
         );
 
         if (!nextQuestion) {
@@ -312,11 +276,11 @@ app.post('/api/0.0/assessments/next-question', async (req, res) => {
 
         // Update session with new question ID
         req.session.assessmentData.currentQuestionId = nextQuestion.questionId;
-        
-        // Save the current document with responses
-        await respondentsDoc.save();
 
-        // Prepare and send next question
+        // Save respondent to database
+        await respondent.save();
+
+        // Format response
         const formattedQuestion = {
             questionText: nextQuestion.questionText,
             answerType: nextQuestion.answerType,
@@ -326,37 +290,16 @@ app.post('/api/0.0/assessments/next-question', async (req, res) => {
         };
 
         res.json({ question: formattedQuestion });
-
     } catch (error) {
-        console.error('Assessment error:', error);
+        console.error(error);
         res.status(500).json({ error: "Server error" });
     }
 });
-
-// Utility function to retrieve assessment responses
-async function getAssessmentResponses(proposerId, assessmentType) {
-    try {
-        const responses = await CdfRespondents.find({ 
-            proposerId: proposerId, 
-            assessmentType: assessmentType 
-        });
-
-        return responses;
-    } catch (error) {
-        console.error('Error retrieving assessment responses:', error);
-        throw error;
-    }
-}
 
 
 
 // API to submit an answer from the proposer (user's response)
 app.post('/api/0.0/proposer/:proposerId/assessments/:assessmentType/questions/:questionId/answer', async (req, res) => {
-
-    // find user
-    // user is not there create a new user
-    // save user response
-
     const { proposerId, assessmentType, questionId, questionText } = req.params;
     const { answer } = req.body;
 
