@@ -46,7 +46,7 @@ app.use(session({
     secret: 'your-secret-key',  // Change this to a secure secret key
     resave: false,
     saveUninitialized: true,
-    cookie: { 
+    cookie: {
         secure: process.env.NODE_ENV === 'production', // Use secure cookies in production
         maxAge: 24 * 60 * 60 * 1000 // 24 hours
     }
@@ -89,15 +89,22 @@ const CdfMaster = mongoose.model('CdfMaster', cdfMasterSchema);
 // Mongoose Schema for the cdf_respondents collection (User responses)
 const cdfRespondentsSchema = new mongoose.Schema({
     proposerId: String,
-    assessmentType: String,
-    assessmentId: String,
     selectedDisease: [String],
-    responses: [
+    assessment: [
         {
-            questionId: String,
-            questionText: String,
-            answer: String,
-            timestamp: { type: Date, default: Date.now }
+            assessmentType: String,
+            assessmentId: String,
+            responses: [
+                {
+                    questionId: String,
+                    questionText: String,
+                    answer: String,
+                    timestamp: { type: Date, default: Date.now }
+                }
+            ],
+            outcomes: {
+                icd10_code: String
+            }
         }
     ]
 });
@@ -174,34 +181,41 @@ app.get('/api/0.0/assessments/:assessmentType/first-question', async (req, res) 
 // 2. API endpoint for getting next question
 app.post('/api/0.0/assessments/next-question', async (req, res) => {
     const { selectedChoice, proposerId } = req.body;
-    
+
     try {
-        // Check if session exists
+        // Check if session exists 
+        // if the Process is not started through the selecting diseases it will through error
         if (!req.session.assessmentData) {
-            return res.status(400).json({ 
-                error: "Assessment session not found. Please start a new assessment." 
+            return res.status(400).json({
+                error: "Assessment session not found. Please start a new assessment."
             });
         }
 
         const { currentQuestionId, assessmentType } = req.session.assessmentData;
 
+
+        // Find the first disease in the database
         const assessment = await CdfMaster.findOne({ assessmentType });
+
+
 
         if (!assessment) {
             return res.status(404).json({ error: "Assessment not found" });
         }
 
         const currentQuestion = assessment.questions.find(q => q.questionId === currentQuestionId);
-        
+
+
         if (!currentQuestion) {
             return res.status(404).json({ error: "Current question not found" });
         }
 
         const selectedChoiceObj = currentQuestion.choices.find(c => c.choiceText === selectedChoice);
-        
+
         if (!selectedChoiceObj) {
             return res.status(400).json({ error: "Invalid choice selected" });
         }
+
 
         // Store response
         const userResponse = {
@@ -218,37 +232,105 @@ app.post('/api/0.0/assessments/next-question', async (req, res) => {
 
         // Save response to the database
         let respondent = await CdfRespondents.findOne({
-            proposerId,
-            assessmentType
+            proposerId: proposerId,
+            // assessmentType
         });
 
+        console.log('respondent', respondent);
+
+
+        // if there is no respond create a document in database 
+
         if (!respondent) {
+            console.log('No respondent found');
             respondent = new CdfRespondents({
                 proposerId,
-                assessmentType,
-                assessmentId: assessment._id,
-                selectedDisease: req.session.assessmentData.selectedDiseases || [],
-                responses: []
+                selectedDisease: req.session.assessmentData?.selectedDiseases || [], // Safely accessing the session data
+                assessment: [
+                    {
+                        assessmentType,
+                        assessmentId: assessment.assessmentId,  // Ensure this is correct
+                        responses: []  // Initializing an empty responses array
+                    }
+                ],
             });
+
+            // Save the newly created respondent to the database
+            await respondent.save(); // Ensure you save the new document if needed
         }
 
-        respondent.responses.push(userResponse);
+        // Ensure that userResponse is properly structured and then push it
+        // respondent.assessment[0].responses.push(userResponse); // Assuming you're pushing to the first assessment in the array
+        var MatchingDisease = respondent.assessment.find(
+            (assessment) => assessment.assessmentType === assessmentType ? true : false
+        )
+
+
+
+        if (MatchingDisease) {
+            console.log("Disease found ")
+            MatchingDisease.responses.push(userResponse);
+            console.log(`Response added to the existing disease with assessmentType: ${assessmentType}`);
+
+        } else {
+            console.log("Disease not found....")
+            respondent.assessment.push({
+                assessmentType,
+                assessmentId: assessment.assessmentId, // Assuming this comes from the current `assessment`
+                responses: [userResponse], // Initialize responses with the current userResponse
+                outcomes: {} // Optional: Add empty outcomes if necessary
+            });
+
+            if (!respondent.selectedDisease.includes(assessmentType)) {
+                console.log(`New disease detected: ${assessmentType}. Adding to selectedDisease...`);
+                respondent.selectedDisease.push(assessmentType);
+                await respondent.save(); // Save after updating selectedDisease
+            } else {
+                console.log(`Disease ${assessmentType} already exists in selectedDisease. Skipping addition.`);
+            }
+
+        }
+
+        // Save changes after adding the new response
+        await respondent.save();  // Make sure to save after modifying the responses
+
+
 
         // Check if assessment is complete
         if (!selectedChoiceObj.nextQuestionId) {
-            const outcome = assessment.outcomes.find(o => 
+            const outcome = assessment.outcomes.find(o =>
                 o.criteria.every(c => {
                     const userResponse = req.session.assessmentData.userResponses
                         .find(r => r.questionId === c.questionId);
                     return userResponse && userResponse.response === c.expectedAnswer;
                 })
             );
-
+            if (MatchingDisease) {
+                console.log("Adding outcome to the existing disease...");
+                MatchingDisease.outcomes = outcome ? {
+                    description: outcome.description,
+                    icd10_code: outcome.icd10_code
+                } : {
+                    icd10_code: "ICD Not Found"
+                };
+            } else {
+                console.log("Adding outcome to the newly added disease...");
+                console.log("respondent.assesment array ---------------", respondent.assessment.length)
+                const lastAssessment = respondent.assessment[respondent.assessment.length - 1];
+                lastAssessment.outcomes = outcome ? {
+                    description: outcome.description,
+                    icd10_code: outcome.icd10_code
+                } : {
+                    icd10_code: "ICD Not Found"
+                };
+            }
             // Add outcome to respondent
-            respondent.outcome = outcome ? {
+            respondent.outcomes = outcome ? {
                 description: outcome.description,
                 icd10_code: outcome.icd10_code
-            } : null;
+            } : {
+                icd10_code: "ICD Not Found"
+            }
 
             // Save respondent to database
             await respondent.save();
@@ -256,17 +338,20 @@ app.post('/api/0.0/assessments/next-question', async (req, res) => {
             // Clear session
             req.session.assessmentData = null;
 
-            return res.json({ 
+            return res.json({
                 completed: true,
                 outcome: outcome ? {
                     description: outcome.description,
-                    icd10_code: outcome.icd10_code
-                } : null
+                    icd10_code: outcome.icd10_code,
+                    message: "ICD Found successfully"
+                } : {
+                    icd10_code: "ICD Not Found"
+                }
             });
         }
 
         // Find and prepare next question
-        const nextQuestion = assessment.questions.find(q => 
+        const nextQuestion = assessment.questions.find(q =>
             q.questionId === selectedChoiceObj.nextQuestionId
         );
 
@@ -276,6 +361,7 @@ app.post('/api/0.0/assessments/next-question', async (req, res) => {
 
         // Update session with new question ID
         req.session.assessmentData.currentQuestionId = nextQuestion.questionId;
+
 
         // Save respondent to database
         await respondent.save();
@@ -289,7 +375,11 @@ app.post('/api/0.0/assessments/next-question', async (req, res) => {
             }))
         };
 
-        res.json({ question: formattedQuestion });
+        res.json({
+            question: formattedQuestion,
+            message: "Next question loaded successfully"
+
+        });
     } catch (error) {
         console.error(error);
         res.status(500).json({ error: "Server error" });
@@ -318,6 +408,7 @@ app.post('/api/0.0/proposer/:proposerId/assessments/:assessmentType/questions/:q
 
         // Record the user's response in cdf_respondents collection
         let respondent = await CdfRespondents.findOne({ proposerId, assessmentType });
+
 
         if (!respondent) {
             respondent = new CdfRespondents({
